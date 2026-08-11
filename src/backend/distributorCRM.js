@@ -157,11 +157,24 @@ async function sendToMYNMAftersalesCRM(reqBody) {
     console.log("MYNM Aftersales CRM response:", res.status, data);
 }
 
-// ─── Wallan (Zoho CRM) — UAE ──────────────────────────────────────────────────
-// Uses OAuth2 refresh token flow — fresh access token fetched before every call.
+// ─── Wallan (Zoho) — shared OAuth ─────────────────────────────────────────────
+// One refresh token serves both Zoho CRM (sales leads) and Zoho Desk (service /
+// contact-us tickets). Scopes actually granted to it (verified live 2026-08-11):
+//   ZohoCRM.modules.leads.READ/CREATE/UPDATE
+//   Desk.tickets.READ/CREATE/UPDATE/WRITE  Desk.search.READ
+// Note there is NO Desk.contacts.* and no Desk basic/settings scope — so we can't
+// create contacts on their own, nor read /organizations or /departments (both come
+// back 403 SCOPE_MISMATCH). Ticket creation works around this by inlining the contact.
 // Secrets: wallan_zoho_client_id, wallan_zoho_client_secret, wallan_zoho_refresh_token
 
+// Zoho rate-limits refresh grants (~10 per 10 min) and an access token is valid for an
+// hour, so cache it rather than minting one per lead — a burst would otherwise throttle.
+// Best-effort: Wix may recycle the backend instance, which merely costs a refetch.
+let wallanToken = { value: null, expiresAt: 0 };
+
 async function getWallanToken() {
+    if (wallanToken.value && Date.now() < wallanToken.expiresAt) return wallanToken.value;
+
     const clientId = await getSecret("wallan_zoho_client_id");
     const clientSecret = await getSecret("wallan_zoho_client_secret");
     const refreshToken = await getSecret("wallan_zoho_refresh_token");
@@ -172,8 +185,13 @@ async function getWallanToken() {
     if (!data.access_token) {
         throw new Error("Wallan Zoho token fetch failed: " + JSON.stringify(data));
     }
-    return data.access_token;
+    // Renew 5 min early so an in-flight request never races the expiry.
+    const ttl = (Number(data.expires_in) || 3600) * 1000;
+    wallanToken = { value: data.access_token, expiresAt: Date.now() + ttl - 5 * 60 * 1000 };
+    return wallanToken.value;
 }
+
+// ─── Wallan (Zoho CRM) — UAE ──────────────────────────────────────────────────
 
 const WALLAN_SOURCE_MAP = {
     "Request a Quote":   { subType: "Request For Quote", source: "Corporate Website", subSource: "Corporate Website" },
@@ -223,8 +241,8 @@ async function sendToWallanCRM(reqBody) {
             Lead_Status: "Not Qualified",
             Preferred_Language: "English",
             Description: reqBody.enquiry || "",
-            // TODO: Campaign is a Zoho picklist (Summer Campaign, Ramadan Campaign, …) but we
-            // pass free text parsed from the social formName — Zoho may reject/drop it. Map or drop before go-live.
+            // Campaign is a picklist in Wallan's Zoho, but they confirmed by email
+            // (2026-08-11) to send our free-text campaign name across as-is.
             Campaign: reqBody.campaign || "",
         }],
     };
@@ -242,6 +260,130 @@ async function sendToWallanCRM(reqBody) {
     console.log("Wallan Zoho CRM response:", res.status, JSON.stringify(data));
 }
 
+// ─── Wallan (Zoho Desk) — UAE service bookings + contact-us ───────────────────
+// Wallan asked (email 2026-08-11) for "contact us" and "book a service appointment"
+// enquiries to go to Zoho Desk as tickets rather than to CRM Leads. Sales enquiries
+// (quote, test drive, social) stay on the CRM Leads path above.
+//
+// Two corrections to Wallan's "Genesis API Documentation Desk - V8" doc, both verified
+// live 2026-08-11 — the doc was written against their SANDBOX portal
+// (wallantradingco1774943580848), not production (wallantradingco):
+//   1. The doc's orgId 919554510 returns 403 OAUTH_ORG_MISMATCH for our token. We can't
+//      look up the right one (/organizations needs a scope we don't have), but omitting
+//      the orgId header entirely makes Desk resolve the token's own org — which is the
+//      correct production portal. So we deliberately send NO orgId header.
+//   2. The doc's department/layout ids (1321189…) are sandbox ids. Production keeps the
+//      same id suffix under a different org prefix (969016…) — confirmed by reading back
+//      real Genesis tickets, whose layoutDetails.layoutName is "Genesis CS Department".
+const WALLAN_DESK_URL = "https://desk.zoho.com/api/v1/tickets";
+const WALLAN_DESK_DEPARTMENT = "969016000000712178"; // "Genesis Workspace"
+const WALLAN_DESK_LAYOUT = "969016000000723611";     // "Genesis CS Department"
+
+// Field values below mirror what Wallan's existing Genesis integration writes into this
+// same department (read back from live tickets 2026-08-11), so their agents' views and
+// reports treat our tickets identically.
+const WALLAN_DESK_KIND = {
+    service: { label: "Service Booking", enquiryType: "Service Enquiry", subType: "Service bookings", section: "Service" },
+    contact: { label: "Contact Us",      enquiryType: "Contact Us",      subType: "General enquiry",  section: "CRM" },
+};
+
+// Wallan's Genesis tickets carry the unmapped detail as a "- Key: value" list in the
+// description — same shape here so nothing the form collects is silently dropped.
+function buildDeskDescription(reqBody) {
+    const lines = [
+        ["Country", reqBody.country],
+        ["Showroom", reqBody.showroom || reqBody.serviceCenter],
+        ["Vehicle", reqBody.vehicleName],
+        ["Preferred date", reqBody.prefDate],
+        ["Preferred time", reqBody.prefTime],
+        ["Preferred contact email", reqBody.contactEmail],
+        ["Current car", reqBody.currentCar],
+        ["Purchase plan", reqBody.purchase],
+        ["Campaign", reqBody.campaign],
+        ["Enquiry", reqBody.enquiry],
+    ];
+    return lines
+        .filter(([, value]) => value)
+        .map(([key, value]) => `- ${key}: ${value}`)
+        .join("\n");
+}
+
+async function sendToWallanDesk(reqBody, kindKey) {
+    const kind = WALLAN_DESK_KIND[kindKey];
+    // In practice this resolves to Corporate Website both ways — a Contact Us lead carries
+    // that source, and service bookings carry no source field at all — but reuse the CRM
+    // map so a future source routed here picks up the same labels.
+    const mapped = WALLAN_SOURCE_MAP[reqBody.source] || {
+        source: "Corporate Website",
+        subSource: "Corporate Website",
+    };
+
+    const { firstName, lastName } = parseName(reqBody.fullName);
+    const phone = reqBody.areaPhoneNumber || "";
+
+    // Zoho rejects an empty string on typed custom fields (cf_service_appointment_date is a
+    // Date), so send only the fields we actually have a value for.
+    const cf = {
+        cf_enquiry_type: kind.enquiryType,
+        cf_enquiry_sub_type: kind.subType,
+        cf_section: kind.section,
+        cf_ticket_source: mapped.source,
+        cf_ticket_sub_source: mapped.subSource,
+        cf_source: mapped.source,
+        cf_make: "Genesis",
+        cf_model: reqBody.vehicleName,
+        // cf_city is a picklist of Saudi cities only; Wallan's own integration puts the
+        // free-text location in "City txt" (cf_city_1) instead, so do the same.
+        cf_city_1: reqBody.country,
+        cf_branch_name: reqBody.serviceCenter || reqBody.showroom,
+        cf_preferred_language: "English",
+        // Free text per Wallan's email (2026-08-11), same as the CRM Leads path.
+        cf_campaign: reqBody.campaign,
+        // Service appointment date is a Date field ("YYYY-MM-DD"). The matching time field
+        // is a DateTime, which our "16:30 ~ 17:00" ranges (and Arabic ones like "المساء")
+        // don't fit — Wallan's own tickets park that raw range in cf_contact_time.
+        cf_service_appointment_date: parseDate(reqBody.prefDate),
+        cf_contact_time: reqBody.prefTime,
+    };
+    for (const key of Object.keys(cf)) {
+        if (!cf[key]) delete cf[key];
+    }
+
+    const payload = {
+        // Wallan's own Genesis tickets use "<Kind>#<Source>#<phone>##" as the subject and
+        // their agents scan on it, so match the format rather than writing prose.
+        subject: `${kind.label}#${mapped.source}#${phone}##`,
+        departmentId: WALLAN_DESK_DEPARTMENT,
+        layoutId: WALLAN_DESK_LAYOUT,
+        // We hold no Desk.contacts scope, but ticket creation may carry the contact inline:
+        // Desk creates it, or silently reuses the existing contact when the email matches.
+        contact: {
+            firstName,
+            lastName,
+            email: reqBody.email || "",
+            phone,
+            mobile: phone,
+        },
+        email: reqBody.email || "",
+        phone,
+        status: "New",
+        description: buildDeskDescription(reqBody),
+        cf,
+    };
+
+    const token = await getWallanToken();
+    const res = await fetch(WALLAN_DESK_URL, {
+        method: "POST",
+        headers: {
+            "Authorization": `Zoho-oauthtoken ${token}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    console.log(`Wallan Zoho Desk (${kind.label}) response:`, res.status, JSON.stringify(data));
+}
+
 // ─── CRM routers ──────────────────────────────────────────────────────────────
 
 export function handleLeadCRM(reqBody) {
@@ -253,7 +395,14 @@ export function handleLeadCRM(reqBody) {
             sendToMYNMCRM(reqBody).catch(err => console.error("MYNM Sales CRM error:", err));
             break;
         case "UAE":
-            sendToWallanCRM(reqBody).catch(err => console.error("Wallan CRM error:", err));
+            // Wallan splits inbound by enquiry type: "Contact Us" is a support enquiry and
+            // belongs in Zoho Desk, everything else (quote, test drive, social) is a sales
+            // lead for Zoho CRM. Requested by email 2026-08-11.
+            if (reqBody.source === "Contact Us") {
+                sendToWallanDesk(reqBody, "contact").catch(err => console.error("Wallan Desk (Contact Us) error:", err));
+            } else {
+                sendToWallanCRM(reqBody).catch(err => console.error("Wallan CRM error:", err));
+            }
             break;
         case "Egypt":
             // sendToEgyptCRM(reqBody);
@@ -273,8 +422,7 @@ export function handleServiceCRM(reqBody) {
             sendToMYNMAftersalesCRM(reqBody).catch(err => console.error("MYNM Aftersales CRM error:", err));
             break;
         case "UAE":
-            // Wallan Zoho Desk (Book a Service) — API docs still pending from Innocean
-            console.log("Wallan Zoho Desk not yet implemented — awaiting API docs");
+            sendToWallanDesk(reqBody, "service").catch(err => console.error("Wallan Desk (Service) error:", err));
             break;
         default:
             console.log("No service CRM configured for country:", country);

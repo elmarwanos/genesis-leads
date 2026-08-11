@@ -5,3 +5,6 @@ node_modules/
 .wix/
 jsconfig.json
 .DS_Store
+distro_crms/
+.claude
+claude.md
