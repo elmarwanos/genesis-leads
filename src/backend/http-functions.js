@@ -1,4 +1,4 @@
-//@ts-nocheck
+// @ts-nocheck
 
 // serverError -> 500
 // badRequest -> 400
@@ -11,7 +11,7 @@ import { fetch } from 'wix-fetch';
 import wixData from "wix-data";
 import { z } from "zod";
 import { triggeredEmails } from 'wix-crm-backend';
-// import { handleLeadCRM } from 'backend/distributorCRM.js';
+import { handleLeadCRM, handleServiceCRM } from 'backend/distributorCRM.js';
 
 
 // Schema Validation Setup
@@ -355,7 +355,7 @@ export async function post_sendLead(request) {
         console.log(options.body);
 
         // Send to Distributor CRM asynchronously
-        // setTimeout(() => handleLeadCRM(options.body), 0);
+        setTimeout(() => handleLeadCRM(options.body), 0);
 
         try {
             let Emailvariables = {
@@ -447,7 +447,7 @@ export async function post_sendBookService(request) {
         options.body = await wixData.insert("BookaService", zodBody);
 
         // Send to Distributor CRM asynchronously
-        // setTimeout(() => handleLeadCRM(options.body), 0);
+        setTimeout(() => handleServiceCRM(options.body), 0);
 
         return created(options)
     } catch (err) {
@@ -544,9 +544,9 @@ export function post_metaWebhook(request) {
 }
 
 // Fetch lead details from Facebook Graph API
-function getLeadDetails(leadgenId) {
+async function getLeadDetails(leadgenId) {
     // If you need to get a new token go to Meta Graph API Explorer https://developers.facebook.com/tools/explorer/990575472948623/
-    const PAGE_ACCESS_TOKEN = "EAAiGTDx23cgBOyPsdgn1PG3s0cieogmmCuDdj0Fz0x0gOuXSGXsA7icHJ6tgOvNmnpAgZCLvnPBSZBL7DM1vvZAZAX6IvWF9KiYwjA3GftFL3sueTg7ZAZCcZBGx8xTvX3wFnT7JEJB4pCBZAW0WHgxFwyIIiBJNgPtXZAcxZC0hJldSHhyrPLz76TZBJMN5A0hAS4kuYTeOLksqbPSCAVqeAZDZD";
+    const PAGE_ACCESS_TOKEN = await getSecret("page_access_token");
     const url = `https://graph.facebook.com/v22.0/${leadgenId}?access_token=${PAGE_ACCESS_TOKEN}`;
 
     return fetch(url, { method: "GET" })
