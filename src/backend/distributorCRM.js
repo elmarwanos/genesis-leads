@@ -357,12 +357,14 @@ async function sendToWallanDesk(reqBody, kindKey) {
         layoutId: WALLAN_DESK_LAYOUT,
         // We hold no Desk.contacts scope, but ticket creation may carry the contact inline:
         // Desk creates it, or silently reuses the existing contact when the email matches.
+        // Only these four keys are accepted here — the inline object takes a narrower field
+        // set than POST /contacts, and anything extra (e.g. "mobile") is a hard 422
+        // UNPROCESSABLE_ENTITY rather than being ignored (verified live 2026-08-11).
         contact: {
             firstName,
             lastName,
             email: reqBody.email || "",
             phone,
-            mobile: phone,
         },
         email: reqBody.email || "",
         phone,
