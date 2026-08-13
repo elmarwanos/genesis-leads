@@ -66,6 +66,18 @@ function parseTime(prefTime) {
     return match ? match[1] + ":00" : "";
 }
 
+// The `sns` field carries the form's "Pref Comms" multi-select — a "/"-separated list of
+// the channels the customer agreed to be contacted on ("Phone", "Email / Phone / SMS",
+// "SMS", …), or empty when they picked none. Wallan's Zoho keeps one flag per channel.
+function parseOptIns(sns) {
+    const value = sns || "";
+    return {
+        email: /email/i.test(value),
+        phone: /phone/i.test(value),
+        sms: /sms/i.test(value),
+    };
+}
+
 // MYNM rejects bare Saudi mobiles missing the leading 0 (e.g. "546011563", common on
 // Snapchat leads) — their validator wants 05XXXXXXXX / 01XXXXXXXX; +966 and spaced
 // formats are accepted as-is (verified against UAT 2026-07-16).
@@ -217,6 +229,7 @@ async function sendToWallanCRM(reqBody) {
 
     const { prefix, firstName, lastName } = parseName(reqBody.fullName);
     const salutation = prefix.replace(".", ""); // Zoho picklist has no trailing dot
+    const optIn = parseOptIns(reqBody.sns);
 
     const payload = {
         data: [{
@@ -240,6 +253,19 @@ async function sendToWallanCRM(reqBody) {
             Lead_Origin: "Website",
             Lead_Status: "Not Qualified",
             Preferred_Language: "English",
+            // Wallan feed their auto-dialer off this flag and asked for it on every record
+            // (email 2026-08-12) — most of their own inbound leads carry it true.
+            Auto_Calling: true,
+            // Consent per channel, from the form's "Pref Comms" selection (2026-08-12).
+            // Note Zoho's own casing here: Phone_Optin, but Email_OptIn / SMS_OptIn.
+            Email_OptIn: optIn.email,
+            Phone_Optin: optIn.phone,
+            SMS_OptIn: optIn.sms,
+            // Branch_Name is a lookup to their Branch module and can only be set by record
+            // id — we hold no scope to read that module, and Wallan haven't sent the id
+            // list yet. Their other integrations write the plain-text Branch field, so do
+            // the same until we have the ids (asked 2026-08-13).
+            Branch: reqBody.showroom || "",
             Description: reqBody.enquiry || "",
             // Campaign is a picklist in Wallan's Zoho, but they confirmed by email
             // (2026-08-11) to send our free-text campaign name across as-is.
@@ -320,9 +346,8 @@ async function sendToWallanDesk(reqBody, kindKey) {
 
     const { firstName, lastName } = parseName(reqBody.fullName);
     const phone = reqBody.areaPhoneNumber || "";
+    const optIn = parseOptIns(reqBody.sns);
 
-    // Zoho rejects an empty string on typed custom fields (cf_service_appointment_date is a
-    // Date), so send only the fields we actually have a value for.
     const cf = {
         cf_enquiry_type: kind.enquiryType,
         cf_enquiry_sub_type: kind.subType,
@@ -344,9 +369,18 @@ async function sendToWallanDesk(reqBody, kindKey) {
         // don't fit — Wallan's own tickets park that raw range in cf_contact_time.
         cf_service_appointment_date: parseDate(reqBody.prefDate),
         cf_contact_time: reqBody.prefTime,
+        // Same three requests as the CRM path (email 2026-08-12). Desk's field names differ
+        // from the CRM's — and note cf_phone_opt_in is spelled unlike its two neighbours.
+        cf_auto_calling: true,
+        cf_email_optin: optIn.email,
+        cf_phone_opt_in: optIn.phone,
+        cf_sms_optin: optIn.sms,
     };
+    // Zoho rejects an empty string on typed custom fields, so drop the ones we have no
+    // value for — but only the empty ones: a false boolean is a real answer ("customer did
+    // not opt in to SMS") and must still be written.
     for (const key of Object.keys(cf)) {
-        if (!cf[key]) delete cf[key];
+        if (cf[key] === undefined || cf[key] === null || cf[key] === "") delete cf[key];
     }
 
     const payload = {
