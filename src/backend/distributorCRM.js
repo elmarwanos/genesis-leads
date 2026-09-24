@@ -428,7 +428,9 @@ export function handleLeadCRM(reqBody) {
         case "Riyadh":
         case "Jeddah":
         case "Dammam":
-            sendToMYNMCRM(reqBody).catch(err => console.error("MYNM Sales CRM error:", err));
+            // MYNM disabled until go-live: endpoint is still UAT, prod URL pending from Waqar.
+            // sendToMYNMCRM(reqBody).catch(err => console.error("MYNM Sales CRM error:", err));
+            console.log("MYNM CRM not yet live — skipping:", country);
             break;
         case "UAE":
             // Wallan splits inbound by enquiry type: "Contact Us" is a support enquiry and
@@ -455,7 +457,9 @@ export function handleServiceCRM(reqBody) {
         case "Riyadh":
         case "Jeddah":
         case "Dammam":
-            sendToMYNMAftersalesCRM(reqBody).catch(err => console.error("MYNM Aftersales CRM error:", err));
+            // MYNM disabled until go-live: endpoint is still UAT, prod URL pending from Waqar.
+            // sendToMYNMAftersalesCRM(reqBody).catch(err => console.error("MYNM Aftersales CRM error:", err));
+            console.log("MYNM Aftersales CRM not yet live — skipping:", country);
             break;
         case "UAE":
             sendToWallanDesk(reqBody, "service").catch(err => console.error("Wallan Desk (Service) error:", err));
