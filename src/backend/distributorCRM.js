@@ -203,7 +203,7 @@ async function getWallanToken() {
     return wallanToken.value;
 }
 
-// ─── Wallan (Zoho CRM) — UAE ──────────────────────────────────────────────────
+// ─── Wallan (Zoho CRM) — Riyadh ──────────────────────────────────────────────────
 
 const WALLAN_SOURCE_MAP = {
     "Request a Quote":   { subType: "Request For Quote", source: "Corporate Website", subSource: "Corporate Website" },
@@ -286,7 +286,7 @@ async function sendToWallanCRM(reqBody) {
     console.log("Wallan Zoho CRM response:", res.status, JSON.stringify(data));
 }
 
-// ─── Wallan (Zoho Desk) — UAE service bookings + contact-us ───────────────────
+// ─── Wallan (Zoho Desk) — Riyadh service bookings + contact-us ───────────────────
 // Wallan asked (email 2026-08-11) for "contact us" and "book a service appointment"
 // enquiries to go to Zoho Desk as tickets rather than to CRM Leads. Sales enquiries
 // (quote, test drive, social) stay on the CRM Leads path above.
@@ -425,7 +425,6 @@ async function sendToWallanDesk(reqBody, kindKey) {
 export function handleLeadCRM(reqBody) {
     const country = reqBody.country;
     switch (country) {
-        case "Riyadh":
         case "Jeddah":
         case "Dammam":
             // MYNM disabled until go-live: endpoint is still UAT, prod URL pending from Waqar.
@@ -433,6 +432,11 @@ export function handleLeadCRM(reqBody) {
             console.log("MYNM CRM not yet live — skipping:", country);
             break;
         case "UAE":
+            // UAE → Wallan switched off 2026-09-24: Wallan is the Riyadh distributor
+            // (their Zoho is Saudi-only). No UAE distributor CRM until confirmed.
+            console.log("No CRM configured for country:", country);
+            break;
+        case "Riyadh":
             // Wallan splits inbound by enquiry type: "Contact Us" is a support enquiry and
             // belongs in Zoho Desk, everything else (quote, test drive, social) is a sales
             // lead for Zoho CRM. Requested by email 2026-08-11.
@@ -454,14 +458,13 @@ export function handleLeadCRM(reqBody) {
 export function handleServiceCRM(reqBody) {
     const country = reqBody.country;
     switch (country) {
-        case "Riyadh":
         case "Jeddah":
         case "Dammam":
             // MYNM disabled until go-live: endpoint is still UAT, prod URL pending from Waqar.
             // sendToMYNMAftersalesCRM(reqBody).catch(err => console.error("MYNM Aftersales CRM error:", err));
             console.log("MYNM Aftersales CRM not yet live — skipping:", country);
             break;
-        case "UAE":
+        case "Riyadh":
             sendToWallanDesk(reqBody, "service").catch(err => console.error("Wallan Desk (Service) error:", err));
             break;
         default:
